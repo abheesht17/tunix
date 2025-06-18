@@ -220,7 +220,7 @@ class PeftTrainer:
     """Creates the train step function."""
 
     def train_step(
-        model: nnx.Module, optimizer: nnx.Optimizer, inputs: TrainingInput
+        model: nnx.Module, optimizer: nnx.Optimizer, inputs: TrainingInput | Any
     ) -> ArrayLike | Tuple[ArrayLike, Any]:
       inputs = self.gen_model_input_fn(inputs)
 
@@ -242,7 +242,7 @@ class PeftTrainer:
   def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
     """Creates the eval step function."""
 
-    def eval_step(model: nnx.Module, inputs: TrainingInput) -> Any:
+    def eval_step(model: nnx.Module, inputs: TrainingInput | Any) -> Any:
       inputs = self.gen_model_input_fn(inputs)
       out = self.eval_loss_fn(model, **inputs)
       if self._has_aux:
@@ -278,7 +278,7 @@ class PeftTrainer:
         )
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
-  def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
+  def _shard_input(self, input_data: TrainingInput | Any) -> TrainingInput | Any:
     mesh = pxla.thread_resources.env.physical_mesh
     if mesh.empty or jax.devices()[0].platform == "cpu":
       return input_data
