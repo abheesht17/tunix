@@ -99,10 +99,10 @@ class SamplerOutput:
   text: list[str]
 
   # Per-step logits used during sampling.
-  logits: list[jax.Array]
+  logits: list[jax.Array] | jax.Array
 
   # Tokens corresponding to the generated samples.
-  tokens: list[jax.Array]
+  tokens: list[jax.Array] | jax.Array
 
   # Left padded prompt tokens.
   padded_prompt_tokens: jax.Array
@@ -310,12 +310,11 @@ class Sampler:
     """Initializes the sampling state given input prompts."""
     batch_size = all_input_ids.shape[0]
     num_input_tokens = all_input_ids.shape[1]
-    buffer_size = total_sampling_steps + 1
 
     token_buffer = jnp.full(
         (
             batch_size,
-            buffer_size,
+            total_sampling_steps,
         ),
         self.tokenizer.pad_id(),
         dtype=jnp.int32,
@@ -340,7 +339,7 @@ class Sampler:
 
     if include_logits:
       logits_buffer = jnp.zeros(
-          (batch_size, buffer_size, self.transformer.num_embed),
+          (batch_size, total_sampling_steps, self.transformer.num_embed),
           dtype=jnp.float32,
       )
     else:
@@ -624,6 +623,7 @@ class Sampler:
       top_k: Optional[int] = None,
       beam_size: Optional[int] = None,
       seed: jax.Array | None = None,
+      pad_output: bool = False,
   ) -> SamplerOutput:
     """Samples a completion of the input string.
 
@@ -646,6 +646,11 @@ class Sampler:
       top_k: top-k sampling threshold.
       beam_size: beam size for beam search.
       seed: random seed for sampling.
+      pad_output: whether to pad the output to maximum length. If this set as
+        True, the output len will be total_generation_steps if echo is False,
+        otherwise it will be total_generation_steps + max_prompt_length. The
+        padding now only supports right padding. Can modify to support left
+        padding if needed.
 
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
@@ -718,32 +723,50 @@ class Sampler:
       # if need more internal states, they should be updated by
       # finalize_beam_search_state
       del sampling_state
-
-    out_tokens = []
-    out_logits = []
-    for i, token_buffer in enumerate(token_buffers):
-      start_idx = (
-          utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
-          if echo
-          else max_prompt_length
+    if pad_output:
+      max_len = total_sampling_steps if echo else total_generation_steps
+      lengths, out_tokens, out_logits = utils.padded_fill_tokens_and_logits(
+          token_buffers,
+          logits_buffers,
+          return_logits,
+          echo,
+          self.tokenizer.pad_id(),
+          self.tokenizer.eos_id(),
+          max_prompt_length,
+          max_len,
       )
-      end_idx = (
-          utils.find_first_eos_idx(
-              token_buffer[max_prompt_length:], self.tokenizer.eos_id()
-          )
-          + max_prompt_length
-      )
-      out_tokens.append(token_buffer[start_idx:end_idx])
-      if return_logits:
-        out_logits.append(logits_buffers[i][start_idx:end_idx])
+      decoded_outputs = [
+          self.tokenizer.decode(tokens[:length].tolist())
+          for tokens, length in zip(out_tokens, lengths)
+      ]
+    else:
+      out_tokens = []
+      out_logits = []
+      lengths = []
+      for i, token_buffer in enumerate(token_buffers):
+        start_idx = (
+            utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
+            if echo
+            else max_prompt_length
+        )
+        end_idx = (
+            utils.find_first_eos_idx(
+                token_buffer[max_prompt_length:], self.tokenizer.eos_id()
+            )
+            + max_prompt_length
+        )
+        out_tokens.append(token_buffer[start_idx:end_idx])
+        if return_logits:
+          out_logits.append(logits_buffers[i][start_idx:end_idx])
+        lengths.append(end_idx - start_idx)
 
-    decoded_outputs = [
-        self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
-    ]
+      decoded_outputs = [
+          self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
+      ]
 
     result = SamplerOutput(
         text=decoded_outputs,
-        logits=out_logits,
+        logits=out_logits if return_logits else [],
         tokens=out_tokens,
         padded_prompt_tokens=all_input_ids,
     )

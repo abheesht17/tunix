@@ -146,7 +146,7 @@ class PeftTrainer:
     self.metrics_logger = metrics_logger.MetricsLogger(
         self.config.metrics_logging_options
     )
-    self.use_external_ckpt_manager = False
+    self.is_managed_externally = False
 
     self._train_steps = 0
     self._eval_steps = 0
@@ -280,7 +280,7 @@ class PeftTrainer:
 
   def _shard_input(self, input_data: TrainingInput | Any) -> TrainingInput | Any:
     mesh = pxla.thread_resources.env.physical_mesh
-    if mesh.empty or jax.devices()[0].platform == "cpu":
+    if mesh.empty:
       return input_data
 
     with jax.transfer_guard("allow"):
@@ -352,7 +352,7 @@ class PeftTrainer:
 
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
 
-    if self.config.max_steps is not None:
+    if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
@@ -360,12 +360,7 @@ class PeftTrainer:
       )
     with time_measure("Train loop"):
       for index, train_example in enumerate(train_ds):
-        # TODO(annyan): This is a temporary solution to support the external
-        # checkpoint manager. Because with external checkpoint manager, the
-        # training steps are not reset to 0, so need to skip the check blow. We
-        # need to think through how checkpointing should work with external
-        # checkpoint manager.
-        if not self.use_external_ckpt_manager:
+        if not self.is_managed_externally:
           # TODO(mridulsahu): Add support to restore the iterator state
           # instead of skipping the already trained examples.
           if index < self._train_steps:
@@ -432,7 +427,10 @@ class PeftTrainer:
           self._prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()
-    # Save the final checkpoint forcefully if not already saved.
+    if not self.is_managed_externally:
+      self.close()
+
+  def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
@@ -441,18 +439,18 @@ class PeftTrainer:
           save_only_lora_params=self._lora_enabled,
           force=True,
       )
-    if not self.use_external_ckpt_manager:
-      self.checkpoint_manager.close()
-    self.close()
 
   @property
   def train_steps(self) -> int:
     return self._train_steps
 
   def close(self):
+    self._save_last_checkpoint()
+    self.checkpoint_manager.close()
     self.metrics_logger.close()
     if self._pbar is not None:
       self._pbar.close()
+      self._pbar = None
 
   def _run_eval(
       self,

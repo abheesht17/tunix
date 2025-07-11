@@ -98,7 +98,10 @@ class Gemma3Config:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
-  def gemma3_1b(cls) -> 'Gemma3Config':
+  def gemma3_1b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     return cls(
         num_layers=26,
         num_embed=262144,
@@ -110,14 +113,18 @@ class Gemma3Config:
         sliding_window_size=512,
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
+        shd_config=sharding_config,
     )
 
   @classmethod
-  def gemma3_4b(cls) -> 'Gemma3Config':
+  def gemma3_4b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     """Gemma3-4B text-only config."""
     return cls(
         num_layers=34,
-        num_embed=262_144,
+        num_embed=262144,
         embed_dim=2560,
         hidden_dim=2560 * 8 // 2,
         num_heads=8,
@@ -127,10 +134,14 @@ class Gemma3Config:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
+        shd_config=sharding_config,
     )
 
   @classmethod
-  def gemma3_12b(cls) -> 'Gemma3Config':
+  def gemma3_12b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     """Gemma3-12B text-only config."""
     return cls(
         num_layers=48,
@@ -145,10 +156,14 @@ class Gemma3Config:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
+        shd_config=sharding_config,
     )
 
   @classmethod
-  def gemma3_27b(cls) -> 'Gemma3Config':
+  def gemma3_27b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     """Gemma3-27B text-only config."""
     return cls(
         num_layers=62,
@@ -163,6 +178,7 @@ class Gemma3Config:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
+        shd_config=sharding_config,
     )
 
 
@@ -229,7 +245,6 @@ class Einsum(nnx.Module):
         nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
     )
 
-  @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     return jnp.einsum(self.einsum_str, x, self.w.value)
 
@@ -534,14 +549,17 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    ff_gate = self.gate_proj(x)
+    with jax.named_scope('gate_proj'):
+      ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
-    ff1 = self.up_proj(x)
+    with jax.named_scope('up_proj'):
+      ff1 = self.up_proj(x)
     activations = gate_value * ff1
     activations = shard(activations, self.shd_config.act_btf)
 
-    outputs = self.down_proj(activations)
+    with jax.named_scope('down_proj'):
+      outputs = self.down_proj(activations)
     return outputs
 
 
@@ -718,12 +736,13 @@ class Gemma3(nnx.Module):
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
-      layer_cache, x = layer(
-          x,
-          positions,
-          layer_cache,
-          attention_mask,
-      )
+      with jax.named_scope(layer_name):
+        layer_cache, x = layer(
+            x,
+            positions,
+            layer_cache,
+            attention_mask,
+        )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 

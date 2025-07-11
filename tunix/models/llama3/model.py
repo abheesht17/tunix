@@ -82,6 +82,20 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
+  def llama3_1b(cls):
+    return cls(
+        num_layers=16,
+        vocab_size=128256,
+        embed_dim=2048,
+        hidden_dim=8192,
+        num_heads=32,
+        head_dim=64,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=500_000,
+    )
+
+  @classmethod
   def llama3_8b(cls):
     return cls(
         num_layers=32,
@@ -465,6 +479,23 @@ class Llama3(nnx.Module):
         rngs=rngs,
         sharding=shd_config.emb_dv,
     )
+
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer."""
+    dummy_batch_size = 1
+    dummy_seq_len = 128
+    return {
+        'input_tokens': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
 
   def __call__(
       self,
