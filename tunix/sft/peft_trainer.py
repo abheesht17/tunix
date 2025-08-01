@@ -14,6 +14,8 @@
 
 """PEFT trainer."""
 
+import keras
+
 from collections.abc import Iterable
 import contextlib
 import dataclasses
