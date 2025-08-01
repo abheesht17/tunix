@@ -14,6 +14,10 @@
 
 """PEFT trainer."""
 
+import os
+os.environ["KERAS_BACKEND"] = "jax"
+os.environ["KERAS_NNX_ENABLED"] = "true"
+
 import keras
 
 from collections.abc import Iterable
