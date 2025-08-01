@@ -144,9 +144,9 @@ class PeftTrainer:
     )
 
     if self._lora_enabled:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
+      self.optimizer = nnx.ModelAndOptimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=self.trainable_var)
+      self.optimizer = nnx.ModelAndOptimizer(self.model, optimizer, wrt=self.trainable_var)
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -231,7 +231,7 @@ class PeftTrainer:
     """Creates the train step function."""
 
     def train_step(
-        model: nnx.Module, optimizer: nnx.Optimizer, inputs: TrainingInput | Any
+        model: nnx.Module, optimizer: nnx.ModelAndOptimizer, inputs: TrainingInput | Any
     ) -> ArrayLike | Tuple[ArrayLike, Any]:
       inputs = self.gen_model_input_fn(inputs)
 
