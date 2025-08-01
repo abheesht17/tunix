@@ -132,10 +132,15 @@ class PeftTrainer:
       optimizer = optax.MultiSteps(
           optimizer, training_config.gradient_accumulation_steps
       )
+
+    self.trainable_var = nnx.All(
+        keras.Variable, lambda path, x: getattr(x, '_trainable', False)
+    )
+
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
-      self.optimizer = nnx.Optimizer(self.model, optimizer)
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=self.trainable_var)
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -146,7 +151,7 @@ class PeftTrainer:
     self.metrics_logger = metrics_logger.MetricsLogger(
         self.config.metrics_logging_options
     )
-    self.use_external_ckpt_manager = False
+    self.is_managed_externally = False
 
     self._train_steps = 0
     self._eval_steps = 0
@@ -224,9 +229,10 @@ class PeftTrainer:
     ) -> ArrayLike | Tuple[ArrayLike, Any]:
       inputs = self.gen_model_input_fn(inputs)
 
+      diff_state = nnx.DiffState(0, self.trainable_var)
       grad_fn = nnx.value_and_grad(
           self.loss_fn,
-          argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+          argnums=diff_state,
           has_aux=self._has_aux,
       )
       out, grads = grad_fn(model, **inputs)
@@ -280,7 +286,7 @@ class PeftTrainer:
 
   def _shard_input(self, input_data: TrainingInput | Any) -> TrainingInput | Any:
     mesh = pxla.thread_resources.env.physical_mesh
-    if mesh.empty or jax.devices()[0].platform == "cpu":
+    if mesh.empty:
       return input_data
 
     with jax.transfer_guard("allow"):
@@ -352,7 +358,7 @@ class PeftTrainer:
 
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
 
-    if self.config.max_steps is not None:
+    if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
@@ -360,12 +366,7 @@ class PeftTrainer:
       )
     with time_measure("Train loop"):
       for index, train_example in enumerate(train_ds):
-        # TODO(annyan): This is a temporary solution to support the external
-        # checkpoint manager. Because with external checkpoint manager, the
-        # training steps are not reset to 0, so need to skip the check blow. We
-        # need to think through how checkpointing should work with external
-        # checkpoint manager.
-        if not self.use_external_ckpt_manager:
+        if not self.is_managed_externally:
           # TODO(mridulsahu): Add support to restore the iterator state
           # instead of skipping the already trained examples.
           if index < self._train_steps:
@@ -412,7 +413,7 @@ class PeftTrainer:
           self._log_metrics(
               train_loss,
               self._train_steps,
-              tflops,
+              tflops=None,
           )
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
 
@@ -432,7 +433,10 @@ class PeftTrainer:
           self._prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()
-    # Save the final checkpoint forcefully if not already saved.
+    if not self.is_managed_externally:
+      self.close()
+
+  def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
@@ -441,18 +445,18 @@ class PeftTrainer:
           save_only_lora_params=self._lora_enabled,
           force=True,
       )
-    if not self.use_external_ckpt_manager:
-      self.checkpoint_manager.close()
-    self.close()
 
   @property
   def train_steps(self) -> int:
     return self._train_steps
 
   def close(self):
+    self._save_last_checkpoint()
+    self.checkpoint_manager.close()
     self.metrics_logger.close()
     if self._pbar is not None:
       self._pbar.close()
+      self._pbar = None
 
   def _run_eval(
       self,
