@@ -199,11 +199,12 @@ python -m tunix.models.qwen2_5_vl.verify_weights \
 3. **Sharding**: Built-in support for FSDP and tensor parallelism
 4. **KV Cache**: JAX-native cache implementation with dynamic updates
 
-### Current Limitations
+### Complete Features
 
-1. **Vision-Text Integration**: Basic implementation provided; full placeholder token replacement needs enhancement
-2. **Flash Attention**: Standard attention implementation; flash attention can be added
-3. **Window Attention**: Full attention used; window patterns can be optimized
+1. **Vision-Text Integration**: Full implementation with placeholder token replacement using `masked_scatter` equivalent
+2. **3D Multimodal RoPE**: Complete 3D position embeddings for temporal, height, and width dimensions
+3. **Window Attention**: Windowed attention support with configurable `fullatt_block_indexes`
+4. **Position Index Generation**: `get_rope_index` generates proper 3D indices for vision and 1D for text tokens
 
 ### Performance Optimizations
 

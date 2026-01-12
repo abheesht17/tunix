@@ -96,9 +96,11 @@ class VisionConfig:
   patch_size: int  # Spatial patch size
   spatial_merge_size: int  # Spatial merge factor
   temporal_patch_size: int  # Temporal patch size for video
-  window_size: int  # Attention window size (currently unused in full attention)
+  window_size: int  # Attention window size for windowed attention layers
   out_hidden_size: int  # Output dimension after patch merger
   norm_eps: float
+  fullatt_block_indexes: Tuple[int, ...] = (7, 15, 23, 31)  # Layers with full attention
+  tokens_per_second: int = 4  # Video processing rate
 
 
 @dataclasses.dataclass(slots=True)
@@ -478,6 +480,157 @@ def apply_multimodal_rotary_embedding(
     k_rotated.append(k_rot)
 
   return jnp.concatenate(q_rotated, axis=-1), jnp.concatenate(k_rotated, axis=-1)
+
+
+def get_rope_index(
+    input_ids: jax.Array,
+    image_grid_thw: jax.Array | None,
+    config: 'ModelConfig',
+) -> jax.Array:
+  """Generate 3D RoPE position indices for vision and 1D for text.
+
+  Args:
+    input_ids: [B, L] token IDs
+    image_grid_thw: [num_images, 3] - temporal, height, width grid dimensions
+    config: Model configuration
+
+  Returns:
+    position_ids: [3, B, L] - temporal, height, width position indices
+                  For text tokens: all 3 dims = sequential position
+                  For vision tokens: computed from grid_thw
+  """
+  batch_size, seq_len = input_ids.shape
+  # Initialize with sequential positions (for text tokens)
+  position_ids = jnp.arange(seq_len)[None, :].repeat(batch_size, axis=0)
+  position_ids_3d = jnp.stack([position_ids, position_ids, position_ids], axis=0)
+
+  if image_grid_thw is None or config.vision_config is None:
+    return position_ids_3d
+
+  # Replace vision token positions with 3D indices
+  spatial_merge_size = config.vision_config.spatial_merge_size
+  image_token_id = config.image_token_id
+
+  for batch_idx in range(batch_size):
+    # Find image token positions
+    image_mask = input_ids[batch_idx] == image_token_id
+    image_positions = jnp.where(image_mask)[0]
+
+    if len(image_positions) == 0:
+      continue
+
+    # For each image region, compute 3D positions
+    current_image_idx = 0
+    for pos in image_positions:
+      if current_image_idx >= image_grid_thw.shape[0]:
+        break
+
+      t, h, w = image_grid_thw[current_image_idx]
+      llm_grid_h = h // spatial_merge_size
+      llm_grid_w = w // spatial_merge_size
+      num_tokens = t * llm_grid_h * llm_grid_w
+
+      # Generate 3D grid indices
+      t_indices = jnp.arange(t).repeat(llm_grid_h * llm_grid_w)
+      h_indices = jnp.tile(jnp.arange(llm_grid_h).repeat(llm_grid_w), t)
+      w_indices = jnp.tile(jnp.tile(jnp.arange(llm_grid_w), llm_grid_h), t)
+
+      # Update position IDs for this image region
+      start_pos = pos
+      end_pos = pos + num_tokens
+      if end_pos <= seq_len:
+        position_ids_3d = position_ids_3d.at[0, batch_idx, start_pos:end_pos].set(t_indices)
+        position_ids_3d = position_ids_3d.at[1, batch_idx, start_pos:end_pos].set(h_indices)
+        position_ids_3d = position_ids_3d.at[2, batch_idx, start_pos:end_pos].set(w_indices)
+
+      current_image_idx += 1
+
+  return position_ids_3d
+
+
+def get_cu_seqlens(grid_thw: jax.Array, spatial_merge_size: int) -> jax.Array:
+  """Compute cumulative sequence lengths for batched attention.
+
+  Args:
+    grid_thw: [num_images, 3] - temporal, height, width dimensions
+    spatial_merge_size: Spatial merge factor
+
+  Returns:
+    cu_seqlens: [num_images + 1] cumulative sequence lengths
+  """
+  # Compute sequence length for each image
+  seqlens = grid_thw[:, 0] * (grid_thw[:, 1] // spatial_merge_size) * (grid_thw[:, 2] // spatial_merge_size)
+  # Cumulative sum with 0 prepended
+  cu_seqlens = jnp.concatenate([jnp.array([0]), jnp.cumsum(seqlens)])
+  return cu_seqlens
+
+
+def get_window_seqlens(
+    grid_thw: jax.Array,
+    spatial_merge_size: int,
+    window_size: int,
+    patch_size: int,
+) -> tuple[jax.Array, jax.Array]:
+  """Compute window indices and cumulative sequence lengths for windowed attention.
+
+  Args:
+    grid_thw: [num_images, 3] - temporal, height, width dimensions
+    spatial_merge_size: Spatial merge factor
+    window_size: Attention window size
+    patch_size: Vision patch size
+
+  Returns:
+    window_index: Flattened indices for windowed tokens
+    cu_window_seqlens: Cumulative sequence lengths for windows
+  """
+  vit_merger_window_size = window_size // spatial_merge_size // patch_size
+  window_indices = []
+  cu_window_seqlens = [0]
+  cumulative_idx = 0
+
+  for grid_t, grid_h, grid_w in grid_thw:
+    llm_grid_h = grid_h // spatial_merge_size
+    llm_grid_w = grid_w // spatial_merge_size
+
+    # Create index tensor
+    index = jnp.arange(grid_t * llm_grid_h * llm_grid_w).reshape(
+        grid_t, llm_grid_h, llm_grid_w
+    )
+
+    # Pad to window boundary
+    pad_h = (vit_merger_window_size - llm_grid_h % vit_merger_window_size) % vit_merger_window_size
+    pad_w = (vit_merger_window_size - llm_grid_w % vit_merger_window_size) % vit_merger_window_size
+
+    if pad_h > 0 or pad_w > 0:
+      index = jnp.pad(index, ((0, 0), (0, pad_h), (0, pad_w)), constant_values=-100)
+
+    # Reshape into windows
+    num_windows_h = (llm_grid_h + pad_h) // vit_merger_window_size
+    num_windows_w = (llm_grid_w + pad_w) // vit_merger_window_size
+
+    # Permute to group windows
+    index = index.reshape(
+        grid_t,
+        num_windows_h,
+        vit_merger_window_size,
+        num_windows_w,
+        vit_merger_window_size,
+    )
+    index = jnp.transpose(index, (0, 1, 3, 2, 4)).reshape(
+        grid_t * num_windows_h * num_windows_w,
+        vit_merger_window_size * vit_merger_window_size,
+    )
+
+    # Filter valid indices and compute sequence lengths
+    valid_mask = index != -100
+    seqlens = jnp.sum(valid_mask, axis=1)
+    valid_indices = index[valid_mask] + cumulative_idx
+
+    window_indices.append(valid_indices)
+    cu_window_seqlens.extend((jnp.cumsum(seqlens) + cu_window_seqlens[-1]).tolist())
+    cumulative_idx += grid_t * llm_grid_h * llm_grid_w
+
+  return jnp.concatenate(window_indices), jnp.array(cu_window_seqlens, dtype=jnp.int32)
 
 
 class VisionAttention(nnx.Module):
@@ -1060,21 +1213,59 @@ class Qwen2_5_VL(nnx.Module):
     # Encode text tokens
     x = self.embedder.encode(input_tokens)
 
-    # Process vision inputs if provided
+    # Process vision inputs if provided and integrate with text embeddings
     if pixel_values is not None and self.config.vision_config is not None:
       vision_features = self.vision_encoder(pixel_values, image_grid_thw)
-      # TODO: Integrate vision features into text embeddings
-      # This requires identifying vision placeholder tokens and replacing them
-      # For now, we'll skip this integration step in the basic implementation
 
-    # Generate position embeddings (standard RoPE for text-only)
-    sin, cos = _generate_pos_embeddings(
-        positions, self.config.head_dim, self.config.rope_theta
-    )
-    sin, cos = sin.astype(x.dtype), cos.astype(x.dtype)
+      # Find image token positions and replace with vision features
+      image_mask = input_tokens == self.config.image_token_id
+      # Expand mask to match embedding dimension: [B, L] -> [B, L, D]
+      image_mask_expanded = image_mask[..., None].repeat(
+          self.config.embed_dim, axis=-1
+      )
+
+      # Flatten vision features to match total number of image tokens
+      vision_features_flat = vision_features.reshape(-1, self.config.embed_dim)
+
+      # Replace image placeholder embeddings with vision features
+      # We use masked_scatter equivalent in JAX
+      x = jnp.where(
+          image_mask_expanded,
+          # Scatter vision features into image token positions
+          vision_features_flat[:jnp.sum(image_mask)][None, :, :].repeat(
+              x.shape[0], axis=0
+          ).reshape(x.shape[0], -1, x.shape[-1])[:, :x.shape[1], :],
+          x,
+      )
+
+    # Generate position embeddings
+    # Use 3D multimodal RoPE if vision inputs present, otherwise standard RoPE
+    if pixel_values is not None and image_grid_thw is not None:
+      # Generate 3D position indices for multimodal inputs
+      position_ids_3d = get_rope_index(input_tokens, image_grid_thw, self.config)
+      # Generate RoPE embeddings for each dimension
+      sin_list, cos_list = [], []
+      for dim_idx in range(3):
+        sin_dim, cos_dim = _generate_pos_embeddings(
+            position_ids_3d[dim_idx],
+            self.config.head_dim // 3,
+            self.config.rope_theta,
+        )
+        sin_list.append(sin_dim)
+        cos_list.append(cos_dim)
+      # Stack: [B, L, 3, D//6] for 3D RoPE
+      sin = jnp.stack(sin_list, axis=2).astype(x.dtype)
+      cos = jnp.stack(cos_list, axis=2).astype(x.dtype)
+      use_multimodal_rope = True
+    else:
+      # Standard 1D RoPE for text-only
+      sin, cos = _generate_pos_embeddings(
+          positions, self.config.head_dim, self.config.rope_theta
+      )
+      sin, cos = sin.astype(x.dtype), cos.astype(x.dtype)
+      use_multimodal_rope = False
 
     # Apply text decoder layers
-    use_multimodal_rope = pixel_values is not None
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
