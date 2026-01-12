@@ -102,6 +102,9 @@ class TrainExample:
   advantages: jax.Array
   ref_per_token_logps: jax.Array | None
   old_per_token_logps: jax.Array | None
+  # Vision-language support
+  pixel_values: jax.Array | None = None
+  image_grid_thw: jax.Array | None = None
 
 
 def compute_kl_divergence(
@@ -212,14 +215,45 @@ def compute_per_token_logps(
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     return_logits: bool = False,
+    pixel_values: jax.Array | None = None,
+    image_grid_thw: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
-  """Computes the per-token log probabilities."""
+  """Computes the per-token log probabilities.
+
+  Args:
+    model: The model to use for computing log probabilities.
+    prompt_tokens: Token IDs for prompts.
+    completion_tokens: Token IDs for completions.
+    pad_id: Padding token ID.
+    eos_id: End-of-sequence token ID.
+    completion_mask: Optional mask for completion tokens.
+    stop_gradient: Whether to stop gradients.
+    return_logits: Whether to return logits along with log probs.
+    pixel_values: Optional image pixel values for vision-language models.
+    image_grid_thw: Optional image grid dimensions for vision-language models.
+
+  Returns:
+    Per-token log probabilities, optionally with logits.
+  """
   input_tokens, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
-  logits, _ = model(
-      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
-  )
+
+  # Call model with vision inputs if provided
+  if pixel_values is not None:
+    logits, _ = model(
+        input_tokens,
+        positions=positions,
+        attention_mask=attn_mask,
+        cache=None,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
+    )
+  else:
+    logits, _ = model(
+        input_tokens, positions=positions, attention_mask=attn_mask, cache=None
+    )
+
   logits_to_keep = completion_tokens.shape[1]
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]

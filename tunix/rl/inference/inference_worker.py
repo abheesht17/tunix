@@ -54,6 +54,8 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
       completion_mask: jax.Array | None = None,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> jax.Array:
     ref_model = self._models.get("reference")
     if ref_model is None:
@@ -67,6 +69,8 @@ class InferenceWorker:
         completion_mask=completion_mask,
         stop_gradient=True,
         return_logits=False,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
     )
 
   def get_values(

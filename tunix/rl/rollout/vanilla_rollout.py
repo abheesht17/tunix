@@ -48,6 +48,8 @@ class VanillaRollout(base_rollout.BaseRollout):
       self,
       prompts: list[str],
       rollout_config: base_rollout.RolloutConfig,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
@@ -62,6 +64,8 @@ class VanillaRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         pad_output=True,
         eos_tokens=rollout_config.eos_tokens,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
     )
     return base_rollout.RolloutOutput(
         text=output.text,
@@ -76,6 +80,8 @@ class VanillaRollout(base_rollout.BaseRollout):
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
       completion_mask: jax.Array | None = None,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
     return common.compute_per_token_logps(
@@ -87,6 +93,8 @@ class VanillaRollout(base_rollout.BaseRollout):
         completion_mask=completion_mask,
         stop_gradient=True,
         return_logits=False,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
     )
 
   def update_params(

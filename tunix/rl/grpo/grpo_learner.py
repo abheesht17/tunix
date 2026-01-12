@@ -212,6 +212,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         micro_batch_size=(
             self._rollout_micro_batch_size * self.algo_config.num_generations
         ),
+        pixel_values=training_input.get("pixel_values"),
+        image_grid_thw=training_input.get("image_grid_thw"),
     )
     completion_ids = rollout_output.tokens
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
@@ -243,6 +245,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
                 self._compute_logps_micro_batch_size
                 * self.algo_config.num_generations
             ),
+            pixel_values=training_input.get("pixel_values"),
+            image_grid_thw=training_input.get("image_grid_thw"),
         )
         interval.device_end([ref_per_token_logps])
     else:
@@ -259,6 +263,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
                 self._compute_logps_micro_batch_size
                 * self.algo_config.num_generations
             ),
+            pixel_values=training_input.get("pixel_values"),
+            image_grid_thw=training_input.get("image_grid_thw"),
         )
         interval.device_end([old_per_token_logps])
     else:
@@ -316,6 +322,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ref_per_token_logps=ref_per_token_logps,
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
+        pixel_values=training_input.get("pixel_values"),
+        image_grid_thw=training_input.get("image_grid_thw"),
     )
 
   def _compute_trajectory_ids(
@@ -456,6 +464,8 @@ def grpo_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_logits=False,
+      pixel_values=train_example.pixel_values,
+      image_grid_thw=train_example.image_grid_thw,
   )
   advantages = train_example.advantages
 

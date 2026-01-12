@@ -116,6 +116,7 @@ _MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
     'llama3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'llama-3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'qwen2.5-': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
+    'qwen2.5-vl-': _ModelFamilyInfo(family='qwen2p5_vl', config_category='qwen2_vl'),
     'qwen3-': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
     'deepseek-r1-distill-qwen-': _ModelFamilyInfo(
         family='deepseek_r1_distill_qwen', config_category='qwen2'

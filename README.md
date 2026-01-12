@@ -44,6 +44,10 @@ features!
   - Feature Pooling & Projection Strategies: General techniques for matching
     intermediate feature representations, even between models of different
     architectures.
+- **Vision-Language Models (NEW):**
+  - Qwen2.5-VL support with dynamic resolution
+  - GRPO training on multimodal datasets
+  - Geometry3K example for visual reasoning tasks
 
 ## Framework & Infra Highlights
 
@@ -115,10 +119,23 @@ pip install -e .
 
 To get started, we have a bunch of detailed examples and tutorials.
 
+### Text Models
+
 - [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_gemma.ipynb)
 - [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_gemma.ipynb)
 - [Logit Distillation using Gemma models](https://github.com/google/tunix/blob/main/examples/logit_distillation.ipynb)
 - [Training Llama3 or Qwen2 using GRPO and SGLang-Jax rollout](https://github.com/google/tunix/blob/main/scripts/grpo_demo_sglang_jax_rollout.py)
+
+### Vision-Language Models
+
+- [Training Qwen2.5-VL on Geometry3K using GRPO](https://github.com/google/tunix/blob/main/examples/qwen2_5_vl_7b_geo3k_grpo.sh)
+- [Vision-Language Documentation](https://github.com/google/tunix/blob/main/docs/vision_language.md)
+
+Quick start for vision-language training:
+
+```bash
+bash examples/qwen2_5_vl_7b_geo3k_grpo.sh
+```
 
 To setup Jupyter notebook on single host GCP TPU VM, please refer to the
 [setup script](https://github.com/google/tunix/blob/main/scripts/setup_notebook_tpu_single_host.sh).

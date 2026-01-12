@@ -188,9 +188,22 @@ class BaseRollout(ABC):
       self,
       prompts: list[str],
       rollout_config: RolloutConfig,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
       **kwargs,
   ) -> RolloutOutput:
-    """Generates samples from the model."""
+    """Generates samples from the model.
+
+    Args:
+      prompts: List of text prompts to generate from.
+      rollout_config: Configuration for generation.
+      pixel_values: Optional image pixel values for vision-language models.
+      image_grid_thw: Optional image grid dimensions for vision-language models.
+      **kwargs: Additional arguments.
+
+    Returns:
+      RolloutOutput containing generated text, tokens, and logits.
+    """
 
   @abstractmethod
   def get_per_token_logps(
@@ -198,8 +211,21 @@ class BaseRollout(ABC):
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
       completion_mask: jax.Array | None = None,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> jax.Array:
-    """Returns per-token log probabilities from the model."""
+    """Returns per-token log probabilities from the model.
+
+    Args:
+      prompt_tokens: Token IDs for prompts.
+      completion_tokens: Token IDs for completions.
+      completion_mask: Optional mask for completion tokens.
+      pixel_values: Optional image pixel values for vision-language models.
+      image_grid_thw: Optional image grid dimensions for vision-language models.
+
+    Returns:
+      Per-token log probabilities.
+    """
 
   @abstractmethod
   def update_params(

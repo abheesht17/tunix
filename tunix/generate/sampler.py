@@ -92,6 +92,10 @@ class _SamplingState:
       beam_search_lib._BeamSearchSamplingState | None
   ) = None
 
+  # Vision inputs (only used during prefill for vision-language models).
+  pixel_values: jax.Array | None = None
+  image_grid_thw: jax.Array | None = None
+
 
 @dataclasses.dataclass(frozen=True)
 class CacheConfig:
@@ -313,6 +317,8 @@ class Sampler(base_sampler.BaseSampler):
       top_k: Optional[int],
       seed: jax.Array,
       beam_size: Optional[int],
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> _SamplingState:
     """Initializes the sampling state given input prompts."""
     batch_size = all_input_ids.shape[0]
@@ -393,6 +399,8 @@ class Sampler(base_sampler.BaseSampler):
         seed=seed,
         sampling_mode=sampling_mode[0],
         beam_search_sampling_state=None,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
     )
 
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
@@ -502,12 +510,23 @@ class Sampler(base_sampler.BaseSampler):
     )
 
     transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
-        tokens,
-        step_positions,
-        sampler_state.cache,
-        attention_mask,
-    )
+    # Pass vision inputs during prefill for vision-language models
+    if sampler_state.pixel_values is not None:
+      logits, cache = transformer(
+          tokens,
+          step_positions,
+          sampler_state.cache,
+          attention_mask,
+          pixel_values=sampler_state.pixel_values,
+          image_grid_thw=sampler_state.image_grid_thw,
+      )
+    else:
+      logits, cache = transformer(
+          tokens,
+          step_positions,
+          sampler_state.cache,
+          attention_mask,
+      )
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
     positions = sampler_state.positions
@@ -644,6 +663,8 @@ class Sampler(base_sampler.BaseSampler):
       beam_size: Optional[int] = None,
       seed: int | None = None,
       pad_output: bool = False,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
@@ -673,6 +694,8 @@ class Sampler(base_sampler.BaseSampler):
         otherwise it will be max_generation_steps + max_prompt_length. The
         padding now only supports right padding. Can modify to support left
         padding if needed.
+      pixel_values: Optional image pixel values for vision-language models.
+      image_grid_thw: Optional image grid dimensions for vision-language models.
 
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
@@ -730,6 +753,8 @@ class Sampler(base_sampler.BaseSampler):
         top_k=top_k,
         seed=seed,
         beam_size=beam_size,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state, sampling_state

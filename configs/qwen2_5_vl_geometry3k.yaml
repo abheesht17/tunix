@@ -1,0 +1,126 @@
+# Configuration for Qwen2.5-VL-7B GRPO training on Geometry3K
+
+# Model configuration
+model:
+  model_family: "qwen2_vl"
+  model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+  model_source: "huggingface"
+
+  # Vision-specific settings
+  vision:
+    min_pixels: 262144  # 256 * 28 * 28
+    max_pixels: 1024000  # 1280 * 28 * 28
+    freeze_vision_tower: false  # Set to true to freeze vision encoder
+
+  # Mesh configuration for distributed training
+  mesh:
+    shape: "(1, 8)"  # (fsdp, tp) - adjust based on available TPUs/GPUs
+    axis_names: "('fsdp', 'tp')"
+
+# Dataset configuration
+data:
+  data_source: "hf"  # HuggingFace
+  dataset_name: "hiyouga/geometry3k"
+  dataset_split_train: "train"
+  dataset_split_val: "test"
+
+  # Batch sizes
+  batch_size: 16  # Reduce if OOM
+  rollout_batch_size: 512
+  validation_batch_size: 128
+
+  # Sequence lengths
+  max_prompt_length: 2048
+  max_response_length: 2048
+  max_target_length: 2048
+
+  # Shuffle
+  shuffle: true
+  shuffle_seed: 42
+
+# Training configuration
+training:
+  num_train_epochs: 15
+  learning_rate: 1.0e-6
+  weight_decay: 0.01
+  warmup_steps: 100
+
+  # Optimizer
+  optimizer: "adamw"
+  schedule_type: "cosine"  # cosine decay
+
+  # Gradient settings
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+
+  # Checkpointing
+  save_steps: 500
+  save_total_limit: 3
+  checkpoint_dir: "checkpoints/qwen2_5_vl_geometry3k"
+
+  # Validation
+  eval_steps: 500
+
+  # Experiment tracking
+  experiment_name: "qwen2_5_vl_7b_geo3k_grpo"
+  logging_steps: 10
+
+# GRPO specific configuration
+grpo:
+  num_generations: 2  # Number of completions per prompt (G in paper)
+  num_iterations: 1  # Training iterations per batch (μ in paper)
+  beta: 0.01  # KL divergence penalty coefficient
+  epsilon: 0.2  # Clipping parameter
+  loss_algo: "grpo"  # "grpo" or "gspo-token"
+  advantage_estimator: "grpo"  # Group-relative advantage
+  use_kl_loss: true
+  kl_penalty_type: "low_var_kl"
+  disable_kl: false
+  online_filtering: false
+
+# Rollout configuration
+rollout:
+  # Generation parameters
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  max_new_tokens: 2048
+
+  # Rollout backend (vanilla, vllm, sglang_jax)
+  # Note: vLLM may not support vision models on TPU yet
+  backend: "vanilla"  # Use vanilla JAX rollout for vision models
+
+  # Memory optimization for rollout
+  gpu_memory_utilization: 0.9  # For GPU-based rollout
+
+# Memory optimization (FSDP)
+fsdp:
+  full_shard: true
+  full_shard_ref: true
+  cpu_offload_actor: false
+  cpu_offload_ref: true
+  rank0_init_actor: true
+  rank0_init_ref: true
+
+# LoRA configuration (optional - set enabled to true to use LoRA)
+lora:
+  enabled: false
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+# Reward function
+reward:
+  reward_fn_module: "tunix.cli.reward_fn.geometry3k"
+  reward_fn_name: "geometry3k_reward_fn"
+
+# Mixed precision
+dtype: "bfloat16"
+
+# Logging
+logging:
+  use_wandb: false  # Set to true to enable W&B logging
+  wandb_project: "tunix-qwen2-vl-grpo"
+  wandb_run_name: "qwen2_5_vl_7b_geometry3k"

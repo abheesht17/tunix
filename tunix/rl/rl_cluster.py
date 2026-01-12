@@ -756,6 +756,8 @@ class RLCluster:
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -768,6 +770,8 @@ class RLCluster:
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
+      pixel_values: Optional image pixel values for vision-language models.
+      image_grid_thw: Optional image grid dimensions for vision-language models.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -806,7 +810,12 @@ class RLCluster:
 
       with self._perf.span("rollout", mesh.devices) as span:
         outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
+            self.rollout.generate(
+                string_prompts[s],
+                rollout_config,
+                pixel_values=pixel_values[s] if pixel_values is not None else None,
+                image_grid_thw=image_grid_thw[s] if image_grid_thw is not None else None,
+            )
             for s in rl_utils.chunk_slices_by_size(
                 stop=len(string_prompts), step=micro_batch_size
             )
@@ -847,6 +856,8 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       completion_mask: jax.Array | None = None,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -885,6 +896,8 @@ class RLCluster:
                 completion_mask=None
                 if completion_mask is None
                 else completion_mask[batch_slice],
+                pixel_values=pixel_values[batch_slice] if pixel_values is not None else None,
+                image_grid_thw=image_grid_thw[batch_slice] if image_grid_thw is not None else None,
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -899,6 +912,8 @@ class RLCluster:
       completion_tokens: jax.Array,
       micro_batch_size: int | None = None,
       completion_mask: jax.Array | None = None,
+      pixel_values: jax.Array | None = None,
+      image_grid_thw: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the current policy model."""
     batch_size = prompt_tokens.shape[0]
@@ -924,6 +939,8 @@ class RLCluster:
                 completion_mask=None
                 if completion_mask is None
                 else completion_mask[batch_slice],
+                pixel_values=pixel_values[batch_slice] if pixel_values is not None else None,
+                image_grid_thw=image_grid_thw[batch_slice] if image_grid_thw is not None else None,
             )
         )
       per_token_logps = jnp.concatenate(outs, axis=0)
