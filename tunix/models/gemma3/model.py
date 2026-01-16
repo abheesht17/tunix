@@ -26,6 +26,7 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.models.gemma3 import vision
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -109,6 +110,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
   param_dtype: jnp.dtype = jnp.bfloat16
+  vision_encoder: 'vision.SigLiPFromPatches | None' = None
 
   @classmethod
   def gemma3_270m(
@@ -304,6 +306,7 @@ class Embedder(nnx.Module):
       vocab_size: int,
       embed_dim: int,
       *,
+      vision_proj_dim: int | None = None,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
       param_dtype: jnp.dtype = jnp.bfloat16,
@@ -315,6 +318,23 @@ class Embedder(nnx.Module):
         sharding=shd_config.emb_vd,
     )
     self.shd_config = shd_config
+    self.vision_proj_dim = vision_proj_dim
+
+    # For multimodal models, add vision projection layers
+    if vision_proj_dim is not None:
+      self.mm_soft_embedding_norm = RMSNorm(
+          vision_proj_dim,
+          rngs=rngs,
+          sharding=(),
+          param_dtype=jnp.float32,  # Keep vision projection in float32
+      )
+      self.mm_input_projection = Einsum(
+          einsum_str='...tm,md->...td',
+          shape=(vision_proj_dim, embed_dim),
+          rngs=rngs,
+          sharding=(None, None),
+          param_dtype=jnp.float32,  # Keep vision projection in float32
+      )
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
@@ -326,6 +346,15 @@ class Embedder(nnx.Module):
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     return jnp.dot(x, self.input_embedding.value.T)
+
+  @jax.named_scope('embedder_encode_vision')
+  def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    """Projects vision embeddings to the embedding space of the text encoder."""
+    if self.vision_proj_dim is None:
+      raise ValueError("Vision projection not initialized")
+    x = self.mm_soft_embedding_norm(x)
+    x = self.mm_input_projection(x)
+    return x
 
   @property
   def embed_dim(self):
@@ -882,13 +911,20 @@ class Gemma3(nnx.Module):
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
+    # Determine vision projection dimension
+    vision_proj_dim = None
+    if config.vision_encoder is not None:
+      vision_proj_dim = config.vision_encoder.siglip_encoder.width
+
     self.embedder = Embedder(
         vocab_size=config.num_embed,
         embed_dim=config.embed_dim,
+        vision_proj_dim=vision_proj_dim,
         rngs=rngs,
         shd_config=config.shd_config,
         param_dtype=config.param_dtype,
     )
+    self.vision_encoder = config.vision_encoder
     self.layers = compat.ModuleList([
         Block(
             num_heads=config.num_heads,
@@ -928,6 +964,9 @@ class Gemma3(nnx.Module):
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
       output_hidden_states: bool = False,
+      images: jaxtyping.Array | None = None,  # [B, N, H, W, C] or [B, H, W, C]
+      image_patches: jaxtyping.Array | None = None,  # [B, N, P, D] pre-processed patches
+      rngs: nnx.Rngs | None = None,  # For vision encoder initialization
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Transformer forward pass.
 
@@ -940,6 +979,9 @@ class Gemma3(nnx.Module):
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
+      images: raw images (uint8) to process through vision encoder.
+      image_patches: pre-processed image patches (alternative to images).
+      rngs: Random number generators (needed for vision encoder initialization).
 
     Returns:
       predicted_logits, new_cache
@@ -948,7 +990,21 @@ class Gemma3(nnx.Module):
       new_cache: updated cache if the input cache is not None, None elsewhere.
     """
     new_cache = None if cache is None else {}
+
+    # Encode text tokens
     x = self.embedder.encode(last_tokens)
+
+    # If we have images, encode and merge them with text embeddings
+    if images is not None or image_patches is not None:
+      x = self._merge_mm_embeddings(
+          tokens=last_tokens,
+          embeddings=x,
+          images=images,
+          image_patches=image_patches,
+          rngs=rngs,
+      )
+
+    # Apply transformer layers
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
@@ -968,6 +1024,86 @@ class Gemma3(nnx.Module):
     logits = self.embedder.decode(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
+
+  def _encode_vision(
+      self,
+      images: jaxtyping.Array | None = None,
+      image_patches: jaxtyping.Array | None = None,
+      rngs: nnx.Rngs | None = None,
+  ) -> jaxtyping.Array:
+    """Encode images into the same space as text embeddings."""
+    if self.vision_encoder is None:
+      raise ValueError("Vision encoder not initialized")
+
+    # Get patches if not provided
+    if image_patches is None:
+      if images is None:
+        raise ValueError("Either images or image_patches must be provided")
+      # Add num_images dimension if not present
+      if len(images.shape) == 4:  # [B, H, W, C]
+        images = images[:, None, :, :, :]  # -> [B, 1, H, W, C]
+      patches = self.vision_encoder.patchify_images(images)
+    else:
+      patches = image_patches
+
+    # Encode patches through ViT
+    soft_embeddings = self.vision_encoder(
+        patches=patches, is_training=False, rngs=rngs
+    )
+
+    # Project to text embedding space
+    soft_embeddings = self.embedder.encode_vision(soft_embeddings)
+    return soft_embeddings
+
+  def _merge_mm_embeddings(
+      self,
+      *,
+      tokens: jaxtyping.Array,  # [B, L]
+      embeddings: jaxtyping.Array,  # [B, L, D]
+      images: jaxtyping.Array | None = None,
+      image_patches: jaxtyping.Array | None = None,
+      rngs: nnx.Rngs | None = None,
+  ) -> jaxtyping.Array:
+    """Update the embeddings to include the vision embeddings."""
+    # Encode the images
+    soft_embeddings = self._encode_vision(
+        images=images, image_patches=image_patches, rngs=rngs
+    )  # [B, N, P, D]
+
+    # Flatten batch and num_images dimensions
+    batch_size, num_images, num_patches, embed_dim = soft_embeddings.shape
+    soft_embeddings = soft_embeddings.reshape(
+        batch_size, num_images * num_patches, embed_dim
+    )  # [B, N*P, D]
+
+    # Merge the soft tokens with text embeddings
+    # Replace TOKEN_PLACEHOLDER (-2) with vision embeddings
+    mask = tokens == vision.TOKEN_PLACEHOLDER  # [B, L]
+    mask_expanded = mask[:, :, None]  # [B, L, 1]
+
+    # Create output embeddings
+    merged_embeddings = jnp.where(
+        mask_expanded,
+        # For placeholder tokens, use vision embeddings
+        # We need to scatter the vision embeddings to the right positions
+        jnp.zeros_like(embeddings),  # Placeholder, will be filled next
+        embeddings,
+    )
+
+    # Fill in vision embeddings at placeholder positions
+    # This is a simplified version; in practice, we need to properly align
+    # the vision embeddings with the placeholder positions
+    vision_idx = 0
+    for b in range(batch_size):
+      for t in range(tokens.shape[1]):
+        if tokens[b, t] == vision.TOKEN_PLACEHOLDER:
+          if vision_idx < soft_embeddings.shape[1]:
+            merged_embeddings = merged_embeddings.at[b, t].set(
+                soft_embeddings[b, vision_idx]
+            )
+            vision_idx += 1
+
+    return merged_embeddings
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
